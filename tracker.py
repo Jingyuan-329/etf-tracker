@@ -4,6 +4,7 @@
 import base64
 import sys
 import warnings
+from datetime import datetime, timezone
 from pathlib import Path
 
 warnings.filterwarnings("ignore")
@@ -21,6 +22,7 @@ warnings.filterwarnings("ignore")  # yfinance re-enables some pandas warnings on
 BASE_DIR = Path(__file__).resolve().parent
 CHART_PATH = BASE_DIR / "chart.png"
 REPORT_PATH = BASE_DIR / "report.html"
+INDEX_PATH = BASE_DIR / "index.html"
 TICKERS = ("VGT", "SMH", "SCHD", "GLD")
 NAMES = {
     "VGT": "Vanguard Information Technology ETF",
@@ -110,9 +112,9 @@ def pct_cell(value):
     return f'<td class="{cls}">{pct_text(value)}</td>'
 
 
-def write_report(rows, data_date, chart_path, report_path):
+def write_report(rows, data_date, chart_path, report_path, index_path):
     encoded = base64.b64encode(chart_path.read_bytes()).decode("ascii")
-    generated = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
+    generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     table_rows = "\n".join(
         f"<tr><td>{r['ticker']}</td><td>{r['name']}</td><td>{r['date']}</td>"
         f"<td>${r['price']:,.2f}</td>{pct_cell(r['1d'])}{pct_cell(r['1m'])}"
@@ -133,7 +135,7 @@ th:nth-child(-n+3),td:nth-child(-n+3){{text-align:left}}th{{background:#f5f5f5}}
 .note{{background:#f8f6e8;border-left:4px solid #c9a227;padding:.75rem 1rem}}
 </style></head><body>
 <h1>ETF Performance Tracker</h1>
-<p class="meta">Generated: {generated}<br>Data date: {data_date}</p>
+<p class="meta">Data date: {data_date}<br>Generated (UTC): {generated}</p>
 <table><thead><tr><th>Ticker</th><th>Name</th><th>Date</th><th>Price</th>
 <th>1D %</th><th>1M %</th><th>1Y %</th></tr></thead><tbody>
 {table_rows}
@@ -146,6 +148,7 @@ used as a gold proxy so it is comparable to the other ETFs.</p>
 </body></html>
 """
     report_path.write_text(html, encoding="utf-8")
+    index_path.write_text(html, encoding="utf-8")
 
 
 def main():
@@ -181,7 +184,10 @@ def main():
     data_date = max(row["date"] for row in rows)
     print_table(rows, data_date)
     make_chart(trends, CHART_PATH)
-    write_report(rows, data_date, CHART_PATH, REPORT_PATH)
+    write_report(rows, data_date, CHART_PATH, REPORT_PATH, INDEX_PATH)
+    print(f"\nWrote: {REPORT_PATH}")
+    print(f"Wrote: {INDEX_PATH}")
+    print(f"Wrote: {CHART_PATH}")
     return 0
 
 
