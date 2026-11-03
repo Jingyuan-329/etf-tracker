@@ -96,10 +96,62 @@ HOLDINGS_FALLBACK = {
 }
 
 
+def load_existing_snapshot():
+    """Return the last written dashboard JSON, or {} if it cannot be read."""
+    path = OUT_DIR / "etf_data.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def positive_number(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(number) or number <= 0:
+        return None
+    return number
+
+
+def overlay_holding(row, src):
+    """Copy a complete holdings row onto row. Incomplete rows are ignored."""
+    if not isinstance(src, dict):
+        return False
+    top1 = src.get("top1")
+    top10 = round_or_none(src.get("top10_pct"), 2)
+    top1_pct = round_or_none(src.get("top1_pct"), 2)
+    if not isinstance(top1, str) or not top1.strip() or top10 is None or top1_pct is None:
+        return False
+    row["top10_pct"] = top10
+    row["top1"] = top1.strip()
+    row["top1_pct"] = top1_pct
+    as_of = src.get("as_of")
+    if isinstance(as_of, str) and as_of.strip():
+        row["as_of"] = as_of.strip()
+    source = src.get("source")
+    if isinstance(source, str) and source.strip():
+        row["source"] = source.strip()
+    return True
+
+
+def write_text_atomic(path, text):
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
 def scrape_fund_meta():
-    """Run dashboard/scrape_meta.mjs (Playwright + Chrome). Return dict or None."""
+    """Run dashboard/scrape_meta.mjs (Playwright + Chrome). Return dict or None.
+
+    None means the scrape did not produce data. Callers keep the existing
+    AUM and holdings snapshot instead of writing nulls.
+    """
     script = BASE_DIR / "dashboard" / "scrape_meta.mjs"
     if not script.exists():
+        print("Playwright scrape skipped: dashboard/scrape_meta.mjs not found")
         return None
     env = dict(os.environ)
     env.setdefault("NODE_PATH", "/workspace/shots-tool/node_modules")
@@ -112,12 +164,30 @@ def scrape_fund_meta():
             text=True,
             timeout=120,
         )
-    except Exception:
+    except Exception as exc:
+        print(f"Playwright scrape skipped: {exc}")
         return None
     if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip().splitlines()
+        hint = ""
+        for line in err:
+            text = line.strip()
+            if text.startswith("Error:") or "Cannot find module" in text or text.startswith("No Chrome"):
+                hint = text
+                break
+        if not hint:
+            for line in reversed(err):
+                text = line.strip()
+                if text and not text.startswith("Node.js v") and not text.startswith("at ") and text not in {"^", "}"}:
+                    hint = text
+                    break
+        if not hint:
+            hint = f"exit {proc.returncode}"
+        print(f"Playwright scrape skipped: {hint[:200]}")
         return None
     out = (proc.stdout or "").strip()
     if not out:
+        print("Playwright scrape skipped: empty output")
         return None
     # scrape_meta may print logs; take the last JSON object line
     for line in reversed(out.splitlines()):
@@ -130,55 +200,100 @@ def scrape_fund_meta():
     try:
         return json.loads(out)
     except json.JSONDecodeError:
+        print("Playwright scrape skipped: output was not JSON")
         return None
 
 
-def fetch_fund(tickers, fetched, asof, meta=None):
-    result = {}
-    assets = dict(STOCKANALYSIS_AUM_FALLBACK)
-    if meta and isinstance(meta.get("assets_usd"), dict):
-        for ticker, value in meta["assets_usd"].items():
-            if value is not None:
-                try:
-                    assets[ticker] = float(int(round(float(value))))
-                except (TypeError, ValueError):
-                    pass
-    for ticker in tickers:
-        row = {"expense_ratio_pct": None, "assets_usd": assets.get(ticker)}
-        try:
-            info = yf.Ticker(ticker).info
-            row["expense_ratio_pct"] = round_or_none(info.get("netExpenseRatio"), 4)
-        except Exception:
-            pass
-        result[ticker] = row
-    result["expense_ratio_source"] = (
-        f"Yahoo Finance via yfinance (netExpenseRatio), fetched {fetched}"
-    )
-    result["assets_source"] = (
+def _assets_source(fetched, asof):
+    return (
         "StockAnalysis ETF overview 'Assets' (ETF share class), "
         f"read {fetched}; quotes on page as of {asof} close; "
         "https://stockanalysis.com/etf/{vgt,smh,schd,gld}/"
     )
+
+
+def fetch_fund(tickers, fetched, asof, meta=None, existing=None):
+    existing = existing if isinstance(existing, dict) else {}
+    existing_fund = existing.get("fund") if isinstance(existing.get("fund"), dict) else {}
+    assets = {}
+    for ticker in tickers:
+        builtin = positive_number(STOCKANALYSIS_AUM_FALLBACK.get(ticker))
+        if builtin is not None:
+            assets[ticker] = float(int(round(builtin)))
+        prev = existing_fund.get(ticker)
+        if isinstance(prev, dict):
+            kept = positive_number(prev.get("assets_usd"))
+            if kept is not None:
+                assets[ticker] = float(int(round(kept)))
+    scraped_assets = False
+    meta_assets = meta.get("assets_usd") if isinstance(meta, dict) else None
+    if isinstance(meta_assets, dict):
+        for ticker, value in meta_assets.items():
+            number = positive_number(value)
+            if number is None:
+                continue
+            assets[ticker] = float(int(round(number)))
+            scraped_assets = True
+    result = {}
+    refreshed_er = False
+    for ticker in tickers:
+        row = {"expense_ratio_pct": None, "assets_usd": assets.get(ticker)}
+        try:
+            info = yf.Ticker(ticker).info or {}
+            row["expense_ratio_pct"] = round_or_none(info.get("netExpenseRatio"), 4)
+        except Exception:
+            pass
+        if row["expense_ratio_pct"] is not None:
+            refreshed_er = True
+        else:
+            prev = existing_fund.get(ticker)
+            if isinstance(prev, dict):
+                kept = round_or_none(prev.get("expense_ratio_pct"), 4)
+                if kept is not None:
+                    row["expense_ratio_pct"] = kept
+        result[ticker] = row
+    if refreshed_er:
+        result["expense_ratio_source"] = (
+            f"Yahoo Finance via yfinance (netExpenseRatio), fetched {fetched}"
+        )
+    else:
+        prev_source = existing_fund.get("expense_ratio_source")
+        result["expense_ratio_source"] = (
+            prev_source
+            if isinstance(prev_source, str) and prev_source.strip()
+            else f"Yahoo Finance via yfinance (netExpenseRatio), fetched {fetched}"
+        )
+    if scraped_assets:
+        result["assets_source"] = _assets_source(fetched, asof)
+    else:
+        prev_source = existing_fund.get("assets_source")
+        result["assets_source"] = (
+            prev_source
+            if isinstance(prev_source, str) and prev_source.strip()
+            else _assets_source(fetched, asof)
+        )
     return result
 
 
-def fetch_holdings(tickers, fetched, meta=None):
+def fetch_holdings(tickers, fetched, meta=None, existing=None):
+    del fetched  # holdings dates come from the snapshot or the scrape, not this run
+    existing = existing if isinstance(existing, dict) else {}
+    existing_holdings = existing.get("holdings") if isinstance(existing.get("holdings"), dict) else {}
+    scraped = {}
+    if isinstance(meta, dict) and isinstance(meta.get("holdings"), dict):
+        scraped = meta["holdings"]
     result = {}
-    scraped = (meta or {}).get("holdings") or {}
     for ticker in tickers:
-        row = dict(HOLDINGS_FALLBACK.get(ticker, {
-            "top10_pct": None, "top1": None, "top1_pct": None,
-            "as_of": None, "source": None,
-        }))
-        src = scraped.get(ticker)
-        if isinstance(src, dict) and src.get("top1") and src.get("top10_pct") is not None:
-            row = {
-                "top10_pct": round_or_none(src.get("top10_pct"), 2),
-                "top1": src.get("top1"),
-                "top1_pct": round_or_none(src.get("top1_pct"), 2),
-                "as_of": src.get("as_of"),
-                "source": src.get("source") or row.get("source"),
-            }
+        row = {
+            "top10_pct": None,
+            "top1": None,
+            "top1_pct": None,
+            "as_of": None,
+            "source": None,
+        }
+        overlay_holding(row, HOLDINGS_FALLBACK.get(ticker))
+        overlay_holding(row, existing_holdings.get(ticker))
+        overlay_holding(row, scraped.get(ticker))
         result[ticker] = row
     return result
 
@@ -318,6 +433,7 @@ def main():
 
     fetched = date.today().strftime("%Y-%m-%d")
     dates_iso = [d.strftime("%Y-%m-%d") for d in dates]
+    existing = load_existing_snapshot()
 
     schd_amounts = [amount for _, amount in divs["SCHD"][-4:]]
     schd_close = lasts["SCHD"]
@@ -334,8 +450,13 @@ def main():
     }
 
     meta = scrape_fund_meta()
+    if meta is None:
+        print("AUM and holdings: kept existing snapshot (Playwright/Chrome unavailable or scrape failed)")
+    else:
+        print("AUM and holdings: applied Playwright scrape where values were present; missing values kept the snapshot")
+    asof_iso = asof.strftime("%Y-%m-%d")
     etf_data = {
-        "asof": asof.strftime("%Y-%m-%d"),
+        "asof": asof_iso,
         "dates": dates_iso,
         "idx": idx,
         "c": closes,
@@ -351,19 +472,16 @@ def main():
             f"offset; YTD base {dates_iso[idx['YTD']]}"
         ),
         "weekly5y": w5,
-        "fund": fetch_fund(TICKERS, fetched, asof.strftime("%Y-%m-%d"), meta),
-        "holdings": fetch_holdings(HOLD_TICKERS, fetched, meta),
+        "fund": fetch_fund(TICKERS, fetched, asof_iso, meta, existing),
+        "holdings": fetch_holdings(HOLD_TICKERS, fetched, meta, existing),
         "schd_ttm_yield": schd_ttm_yield,
         "badge_marks": {"VGT": "V", "SMH": "SM", "SCHD": "SC", "GLD": "G"},
     }
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     etf_json = json.dumps(etf_data, separators=(",", ":"), ensure_ascii=False)
-    (OUT_DIR / "etf_data.json").write_text(etf_json, encoding="utf-8")
-    (OUT_DIR / "data.js").write_text(
-        f"window.ETF_DATA = {etf_json};\n",
-        encoding="utf-8",
-    )
+    write_text_atomic(OUT_DIR / "etf_data.json", etf_json)
+    write_text_atomic(OUT_DIR / "data.js", f"window.ETF_DATA = {etf_json};\n")
 
     print(f"asof: {etf_data['asof']}")
     for ticker in TICKERS:

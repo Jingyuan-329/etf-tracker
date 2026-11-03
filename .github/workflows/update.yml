@@ -29,13 +29,22 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Generate dashboard
+        id: root_report
         run: python tracker.py
 
+      # Best-effort. A dashboard failure must not block the root report commit.
+      # Without Playwright/Chrome, dashboard_data.py keeps the saved AUM and holdings.
+      - name: Update static dashboard data
+        id: static_dashboard
+        continue-on-error: true
+        run: python dashboard_data.py
+
       - name: Commit and push changes
+        if: steps.root_report.outcome == 'success'
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add index.html report.html chart.png
+          git add index.html report.html chart.png dashboard/etf_data.json dashboard/data.js
           if git diff --cached --quiet; then
             echo 'No changes'
           else

@@ -23,6 +23,14 @@
       if (m) FETCHED = m[1];
     }
   })();
+  var ASSETS_READ = null;
+  (function () {
+    var s = D.fund && D.fund.assets_source;
+    if (typeof s === "string") {
+      var m = s.match(/read (\d{4}-\d{2}-\d{2})/);
+      if (m) ASSETS_READ = m[1];
+    }
+  })();
 
   var TK = ["VGT", "SMH", "SCHD", "GLD"];
   var META = {
@@ -535,7 +543,8 @@
     var stamp = "截至 " + asof + " 收盘 · 来源 " + SRC;
     var fundStamp = "来源 " + SRC + " 基金资料 · 抓取于 " + (FETCHED || "\u2014");
     var assetsShort = srcShort(D.fund && D.fund.assets_source);
-    var assetsStamp = assetsShort + "，读取于 " + (FETCHED || "\u2014");
+    var assetsRead = ASSETS_READ || FETCHED || "\u2014";
+    var assetsStamp = assetsShort + "，读取于 " + assetsRead;
 
     var wrap = el("div", { class: "wrap" });
     var grid = el("div", { class: "g12" });
@@ -762,7 +771,7 @@
       mGrid.appendChild(m52);
       var mAum = el("div", { style: { gridColumn: "span 2" } });
       mAum.appendChild(document.createTextNode("规模* "));
-      mAum.appendChild(el("span", { style: { color: C.g800 }, text: aumText(mt) + " · " + assetsShort + " " + (FETCHED || "\u2014") }));
+      mAum.appendChild(el("span", { style: { color: C.g800 }, text: aumText(mt) + " · " + assetsShort + " " + assetsRead }));
       mGrid.appendChild(mAum);
       mc.appendChild(mGrid);
       qmob.appendChild(mc);
@@ -790,7 +799,7 @@
     var vgtAsof = (holdOf("VGT").as_of != null && holdOf("VGT").as_of !== "") ? holdOf("VGT").as_of : "\u2014";
     var smhAsof = (holdOf("SMH").as_of != null && holdOf("SMH").as_of !== "") ? holdOf("SMH").as_of : "\u2014";
     ncol.appendChild(el("div", { text: "• 费用率取自 " + erSrc + "；规模取自 " + asSrc + "。前十大持仓：VGT 取自 " + vgtSrc + "，截至 " + vgtAsof + "；SMH 取自 " + smhSrc + "，截至 " + smhAsof + "。GLD 以 SPDR 黄金 ETF 代替现货金价。" }));
-    ncol.appendChild(el("div", { text: "• 本页为写入时的静态快照，不会自动刷新，不含任何预测或目标价。" }));
+    ncol.appendChild(el("div", { text: "• 本页是每日收盘后写入的静态快照，打开后不会自行拉取行情，不含任何预测或目标价。" }));
     var srcLine = el("div", { style: { marginTop: "4px" } });
     srcLine.appendChild(document.createTextNode("原始数据："));
     for (var s1 = 0; s1 < TK.length; s1++) {

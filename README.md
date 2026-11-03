@@ -19,7 +19,7 @@ https://jingyuan-329.github.io/etf-tracker/
 - `dashboard/index.html`、`dashboard/app.js`、`dashboard/style.css`：纯原生 JS/CSS，无 CDN、无外部请求，可离线打开。
 - `dashboard/data.js`：定义 `window.ETF_DATA`（内容与 `etf_data.json` 相同），用 `<script>` 加载，因此 `file://` 与 GitHub Pages 都可用（`file://` 下浏览器不允许 `fetch()` 本地 JSON）。
 - `dashboard/etf_data.json`：与原导出相同的 schema：`asof`、`dates`、`idx`、`c`、`ret`（含 5Y）、`last`、`prev`、`hi`、`lo`、`div`、`ttm`、`ret_method`、`weekly5y`、`fund`、`holdings`、`schd_ttm_yield`、`badge_marks`。
-- 费用率来自 Yahoo Finance（经 yfinance）；规模（AUM）统一采用 StockAnalysis ETF 概览页「Assets」（ETF 份额类别净资产）；前十大持仓：VGT 来自 StockAnalysis（Finnhub），SMH 来自 VanEck 每日持仓。`dashboard_data.py` 会优先用 Playwright/Chrome 抓取这些页面（`dashboard/scrape_meta.mjs`），失败则回退到内置快照值。
+- 费用率来自 Yahoo Finance（经 yfinance）；规模（AUM）统一采用 StockAnalysis ETF 概览页「Assets」（ETF 份额类别净资产）；前十大持仓：VGT 来自 StockAnalysis（Finnhub），SMH 来自 VanEck 每日持仓。`dashboard_data.py` 会优先用 Playwright/Chrome 抓取这些页面（`dashboard/scrape_meta.mjs`）。抓取不可用、失败，或某个字段为空时，保留 `dashboard/etf_data.json` 里已有的规模和持仓，不用 `null` 覆盖；文件里也没有这些字段时才使用脚本内置快照。
 
 ### 功能
 
@@ -43,7 +43,15 @@ source venv/bin/activate && python dashboard_data.py
 venv/bin/python dashboard_data.py
 ```
 
-脚本会重新抓取 yfinance 数据并覆盖 `dashboard/etf_data.json` 和 `dashboard/data.js`，并在终端打印数据截至日期（`asof`）。取不到的值写为 `null`，页面显示 `—`，不会编造数据。
+脚本会重新抓取 yfinance 行情并覆盖 `dashboard/etf_data.json` 和 `dashboard/data.js`，并在终端打印数据截至日期（`asof`）。行情里取不到的字段写为 `null`，页面显示 `—`，不会编造数据，也不含预测。规模和持仓在页面抓取失败时保留已有快照。
+
+同一刷新已接进每日工作流，见下文「自动更新」。
+
+### 每日自动刷新
+
+`.github/workflows/update.yml` 在 `python tracker.py` 之后运行 `python dashboard_data.py`。依赖与根报告相同，由该工作流的 `pip install -r requirements.txt` 安装（含 yfinance、pandas）。成功时把 `dashboard/etf_data.json` 和 `dashboard/data.js` 与根目录报告一并提交。
+
+Playwright/Chrome 抓取规模和持仓是可选的。GitHub 托管 runner 上通常没有现成浏览器，这一步会保留仓库里已有的规模和持仓快照，而不是失败退出，也不会把这些字段写成 `null`。即便 `dashboard_data.py` 本身失败，工作流仍会提交根目录的 `index.html`、`report.html` 和 `chart.png`。
 
 ### 本地打开
 
@@ -54,21 +62,6 @@ python3 -m http.server 8000
 ```
 
 然后访问 http://localhost:8000/dashboard/ 。
-
-### 可选：加入自动更新工作流
-
-当前 `.github/workflows/update.yml` 未修改。如需自动更新仪表盘，可在 `Generate dashboard` 步骤后增加一步 `run: python dashboard_data.py`，并把 `git add` 那行改为同时添加仪表盘数据文件，例如：
-
-```yaml
-      - name: Generate dashboard
-        run: python tracker.py
-
-      - name: Update static dashboard data
-        run: python dashboard_data.py
-
-      # 在现有 "Commit and push changes" 步骤中，把 git add 那一行改为：
-      #   git add index.html report.html chart.png dashboard/etf_data.json dashboard/data.js
-```
 
 ## 开启 GitHub Pages
 
@@ -107,7 +100,7 @@ python tracker.py
 
 ## 自动更新
 
-自动更新由工作流 `.github/workflows/update.yml` 实现，周一至周五 UTC 22:30（即美股收盘后）运行，只在有变化时提交 `index.html`、`report.html` 和 `chart.png`。提交后 GitHub Pages 会在几分钟内自动重新部署。GitHub 的定时任务可能有几分钟到更长的延迟。
+自动更新由工作流 `.github/workflows/update.yml` 实现，周一至周五 UTC 22:30（即美股收盘后）运行。每次运行会更新根目录报告，并重新生成静态仪表盘数据（`dashboard/etf_data.json`、`dashboard/data.js`），因此仪表盘与根报告一样按交易日刷新。只在有变化时提交 `index.html`、`report.html`、`chart.png` 和上述两个仪表盘数据文件。提交后 GitHub Pages 会在几分钟内自动重新部署。GitHub 的定时任务可能有几分钟到更长的延迟。规模和持仓在 CI 无法抓取页面时沿用上一次快照，日期和来源仍标在页面上。仪表盘这一步失败时，根目录报告仍会照常提交。
 
 如需手动触发：打开 **Actions** 标签页 → **Update ETF dashboard** → **Run workflow**。
 
@@ -121,7 +114,7 @@ python tracker.py
 - `chart.png`：四只 ETF 近 1 年归一化走势图（起点为 100）
 - `dashboard/index.html`、`dashboard/app.js`、`dashboard/style.css`：静态仪表盘页面（纯原生 JS/CSS）
 - `dashboard/data.js`：供仪表盘通过 `<script>` 加载的数据（`window.ETF_DATA`）
-- `dashboard/etf_data.json`：仪表盘数据（与原导出相同 schema），由 `dashboard_data.py` 生成
+- `dashboard/etf_data.json`：仪表盘数据（与原导出相同 schema），由 `dashboard_data.py` 生成，并随每日工作流一起提交
 
 `tracker.py` 的输出写入脚本所在目录，`dashboard_data.py` 的输出写入 `dashboard/` 目录。另外仓库根目录有一个空的 `.nojekyll` 文件（非脚本生成），用于让 GitHub Pages 跳过 Jekyll、直接提供静态文件。
 
