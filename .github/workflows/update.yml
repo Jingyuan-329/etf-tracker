@@ -1,8 +1,6 @@
 name: Update ETF dashboard
 
 on:
-  schedule:
-    - cron: '30 22 * * 1-5'
   workflow_dispatch:
 
 permissions:
